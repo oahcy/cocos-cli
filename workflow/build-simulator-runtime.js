@@ -69,12 +69,10 @@ function buildImportMap(featureUnits) {
         imports: {
             'cc/env': './builtin/cce.env.js',
             'cce.env': './builtin/cce.env.js',
-            'cce:/internal/x/cc': './cocos-js/cc.js',
         },
     };
 
     for (const featureUnit of featureUnits) {
-        importMap.imports[featureUnit] = `./cocos-js/${featureUnit}.js`;
         importMap.imports[`cce:/internal/x/cc-fu/${featureUnit}`] = `./cocos-js/${featureUnit}.js`;
     }
 
@@ -205,6 +203,7 @@ if (require.main === module) {
 module.exports = {
     buildSimulatorRuntime,
     buildSimulatorTsArtifacts: buildSimulatorRuntime,
+    buildImportMap,
     getSimulatorStaticDir,
     getSimulatorRuntimeBuildPlatform,
     parseSimulatorSpineFeature,

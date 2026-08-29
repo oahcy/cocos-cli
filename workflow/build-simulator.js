@@ -129,5 +129,6 @@ module.exports = {
     getSimulatorExecutablePath,
     getSimulatorReleaseDir,
     parseCliEnginePath,
+    platformArtifacts,
     resolveEngineDir,
 };

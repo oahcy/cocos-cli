@@ -51,7 +51,6 @@ async function httpHandler(url) {
     importMapList.push({ location: './', map: {
         imports: {
             'cc': 'cce:/internal/x/cc',
-            'cce:/internal/x/cc': './src/cocos-js/cc.js',
             'cc/userland/macro': 'http://<%= previewIp %>:<%= previewPort %>/scripting/userland/macro',
         },
     } });
@@ -70,13 +69,6 @@ async function httpHandler(url) {
             },
         },
     });
-    // Preview settings may reference the builtin default physics material serialized as
-    // `cc.PhysicMaterial`. Native simulator needs physics-framework instantiated early so
-    // its deprecated alias registration runs before scene/material deserialization.
-    const eagerModules = [
-        'cce:/internal/x/cc-fu/physics-framework',
-    ].filter((specifier) => Object.prototype.hasOwnProperty.call(importMapEngineMods.imports, specifier));
-    await Promise.all(eagerModules.map((specifier) => System.import(specifier)));
 
     System.import('./src/application.js').then(({ Application }) => {
         return new Application();

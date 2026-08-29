@@ -1,302 +1,59 @@
 import { randomUUID } from 'crypto';
 import { spawn, type ChildProcess } from 'child_process';
-import ejs from 'ejs';
-import { copy, emptyDir, ensureDir, pathExists, readFile, readJSON, stat, writeFile } from 'fs-extra';
-import { dirname, isAbsolute, join, resolve } from 'path';
+import { emptyDir, ensureDir, pathExists, readFile, remove, stat, writeFile } from 'fs-extra';
+import { join, resolve } from 'path';
 import { GlobalPaths } from '../../global';
+import {
+    ResolutionPolicy,
+    createArgs,
+    getHostManifest,
+    getSimulatorDir,
+    getSimulatorResourcesPath,
+    getSimulatorWritablePath,
+    isReadyServerURL,
+    markSessionStopped,
+    normalizeServerURL,
+    resolveEnginePath,
+    resolvePreloadAssetList,
+    resolvePrepareTargets,
+    resolveRuntimeRoot,
+    writeSimulatorConfig,
+} from './internal';
+import {
+    assertRequiredSimulatorArtifacts,
+    copyIfExists,
+    renderApplicationScript,
+    renderMainScript,
+    writeRuntimeEngineBootstrap,
+    writeSettingsFiles,
+    type IPreviewData,
+} from './runtime-writer';
+import type {
+    ISimulatorLaunchPreviewOptions,
+    ISimulatorLaunchPreviewResult,
+    ISimulatorManifest,
+    ISimulatorPrepareOptions,
+    ISimulatorPreparedResources,
+    ISimulatorResolution,
+    ISimulatorSessionInfo,
+    ISimulatorStartOptions,
+} from './internal';
 
-type SimulatorStatus = 'running' | 'stopped';
-type SimulatorBuildPlatform = 'mac' | 'windows';
-
-enum ResolutionPolicy {
-    ResolutionExactFit,
-    ResolutionNoBorder,
-    ResolutionShowAll,
-    ResolutionFixedHeight,
-    ResolutionFixedWidth,
-}
-
-export interface ISimulatorManifest {
-    /**
-     * Native simulator executable metadata for the current host platform.
-     */
-    platform: NodeJS.Platform;
-    bundle: string;
-    entry: string;
-    builtAt?: string;
-}
-
-export interface ISimulatorResolution {
-    width: number;
-    height: number;
-}
-
-export interface ISimulatorPrepareOptions {
-    enginePath?: string;
-    projectPath?: string;
-    serverURL?: string;
-    /**
-     * Override the runtime asset server. When specified, simulator settings will
-     * treat project bundles as remote bundles and fetch them over HTTP.
-     */
-    assetServerURL?: string;
-    startScene?: string;
-    /**
-     * Explicit scene JSON for unsaved/current scene preview.
-     */
-    previewSceneJson?: string | Record<string, unknown>;
-    waitForConnect?: boolean;
-    resolution?: ISimulatorResolution;
-    landscape?: boolean;
-    cleanCaches?: boolean;
-}
-
-export interface ISimulatorPreparedResources {
-    runtimeRoot: string;
-    writablePath: string;
-    executablePath: string;
-    projectPath: string;
-    serverURL: string;
-    previewSceneJsonPath: string;
-    settingsPath: string;
-    mainScriptPath: string;
-    applicationScriptPath: string;
-    configPath: string;
-}
-
-export interface ISimulatorLaunchPreviewOptions extends ISimulatorPrepareOptions, Omit<ISimulatorStartOptions, 'runtimeRoot' | 'projectDir' | 'entryFile' | 'writablePath'> {
-    port?: number;
-    previewMode?: 'game' | 'scene-editor';
-}
-
-export interface ISimulatorLaunchPreviewResult {
-    prepared: ISimulatorPreparedResources;
-    session: ISimulatorSessionInfo;
-}
-
-export interface ISimulatorStartOptions {
-    runtimeRoot?: string;
-    /**
-     * @deprecated Use runtimeRoot instead. Kept temporarily as an alias while Pink
-     * migrates to the runtime-root based launch flow.
-     */
-    projectDir?: string;
-    enginePath?: string;
-    entryFile?: string;
-    writablePath?: string;
-    searchPaths?: string[];
-    resolution?: ISimulatorResolution;
-    scale?: number;
-    landscape?: boolean;
-    portrait?: boolean;
-    showConsole?: boolean;
-    debugLogFile?: string;
-    position?: { x: number; y: number };
-    bindAddress?: string;
-    env?: Record<string, string | undefined>;
-}
-
-export interface ISimulatorSessionInfo {
-    id: string;
-    pid?: number;
-    status: SimulatorStatus;
-    startedAt?: string;
-    exitedAt?: string;
-    exitCode?: number | null;
-    signal?: NodeJS.Signals | string | null;
-    runtimeRoot: string;
-    /**
-     * @deprecated Use runtimeRoot instead.
-     */
-    projectDir: string;
-    enginePath: string;
-    executablePath: string;
-    args: string[];
-}
+export type {
+    ISimulatorLaunchPreviewOptions,
+    ISimulatorLaunchPreviewResult,
+    ISimulatorManifest,
+    ISimulatorPrepareOptions,
+    ISimulatorPreparedResources,
+    ISimulatorResolution,
+    ISimulatorSessionInfo,
+    ISimulatorStartOptions,
+};
 
 interface ISimulatorSessionRecord {
     child: ChildProcess;
     startOptions: ISimulatorStartOptions;
     info: ISimulatorSessionInfo;
-}
-
-interface IHostArtifact {
-    bundle: string;
-    entry: string;
-}
-
-interface IPreviewData {
-    settings: any;
-    bundleConfigs: any[];
-    features: string[];
-}
-
-function markSessionStopped(
-    info: ISimulatorSessionInfo,
-    exitCode: number | null,
-    signal: NodeJS.Signals | string | null,
-): void {
-    info.status = 'stopped';
-    info.exitCode = exitCode;
-    info.signal = signal;
-    info.exitedAt = new Date().toISOString();
-}
-
-const platformArtifacts: Partial<Record<NodeJS.Platform, IHostArtifact>> = {
-    darwin: {
-        bundle: 'SimulatorApp-Mac.app',
-        entry: 'SimulatorApp-Mac.app/Contents/MacOS/SimulatorApp-Mac',
-    },
-    win32: {
-        bundle: 'SimulatorApp-Win32.exe',
-        entry: 'SimulatorApp-Win32.exe',
-    },
-};
-
-function getHostManifest(): ISimulatorManifest | null {
-    const manifest = platformArtifacts[process.platform];
-    if (!manifest) {
-        return null;
-    }
-
-    return {
-        platform: process.platform,
-        bundle: manifest.bundle,
-        entry: manifest.entry,
-    };
-}
-
-function getSimulatorBuildPlatform(): SimulatorBuildPlatform {
-    if (process.platform === 'darwin') {
-        return 'mac';
-    }
-    if (process.platform === 'win32') {
-        return 'windows';
-    }
-    throw new Error(`Simulator is not supported on host platform: ${process.platform}`);
-}
-
-function resolveEnginePath(enginePath?: string): string {
-    return resolve(enginePath || GlobalPaths.enginePath);
-}
-
-function getSimulatorDir(enginePath?: string): string {
-    return join(resolveEnginePath(enginePath), 'native', 'simulator', 'Release');
-}
-
-function getSimulatorRoot(enginePath?: string): string {
-    const manifest = getHostManifest();
-    if (!manifest) {
-        throw new Error(`Simulator is not supported on host platform: ${process.platform}`);
-    }
-    const releaseDir = getSimulatorDir(enginePath);
-    return process.platform === 'darwin' ? join(releaseDir, manifest.bundle) : releaseDir;
-}
-
-function getSimulatorResourcesPath(enginePath?: string): string {
-    const simulatorRoot = getSimulatorRoot(enginePath);
-    return process.platform === 'darwin'
-        ? join(simulatorRoot, 'Contents', 'Resources')
-        : simulatorRoot;
-}
-
-function getSimulatorWritablePath(enginePath?: string): string {
-    if (process.platform === 'darwin') {
-        return getSimulatorResourcesPath(enginePath);
-    }
-
-    const localAppData = process.env.LOCALAPPDATA;
-    if (localAppData) {
-        return join(localAppData, 'SimulatorApp-Win32', 'debugruntime');
-    }
-    return getSimulatorResourcesPath(enginePath);
-}
-
-function normalizeServerURL(serverURL: string): string {
-    return serverURL.replace(/\/+$/, '');
-}
-
-function isReadyServerURL(serverURL: string | undefined | null): serverURL is string {
-    return typeof serverURL === 'string' && /^https?:\/\//.test(serverURL);
-}
-
-function formatPath(pathValue: string): string {
-    return pathValue.replace(/\\/g, '/');
-}
-
-function parsePreviewServer(serverURL: string) {
-    const url = new URL(serverURL);
-    return {
-        previewIp: url.hostname,
-        previewPort: Number(url.port || (url.protocol === 'https:' ? '443' : '80')),
-    };
-}
-
-function requireFromEngine<T = any>(request: string, enginePath: string): T {
-    const resolved = require.resolve(request, {
-        paths: [enginePath, GlobalPaths.workspace],
-    });
-    return require(resolved) as T;
-}
-
-function resolveRuntimeRoot(options: ISimulatorStartOptions): string {
-    const runtimeRoot = options.runtimeRoot ?? options.projectDir;
-    if (runtimeRoot) {
-        return resolve(runtimeRoot);
-    }
-    return getSimulatorResourcesPath(options.enginePath);
-}
-
-function resolveOptionPath(runtimeRoot: string, filePath: string): string {
-    if (isAbsolute(filePath)) {
-        return filePath;
-    }
-    return resolve(runtimeRoot, filePath);
-}
-
-function createArgs(options: ISimulatorStartOptions): string[] {
-    const runtimeRoot = resolveRuntimeRoot(options);
-    const args = ['-workdir', runtimeRoot];
-
-    if (options.entryFile) {
-        args.push('-entry', resolveOptionPath(runtimeRoot, options.entryFile));
-    }
-
-    const writablePath = options.writablePath
-        ? resolveOptionPath(runtimeRoot, options.writablePath)
-        : getSimulatorWritablePath(options.enginePath);
-    args.push('-writable-path', writablePath);
-
-    if (options.landscape) {
-        args.push('-landscape');
-    }
-    if (options.portrait) {
-        args.push('-portrait');
-    }
-    if (options.resolution) {
-        args.push('-resolution', `${options.resolution.width}x${options.resolution.height}`);
-    }
-    if (typeof options.scale === 'number') {
-        args.push('-scale', `${options.scale}`);
-    }
-    if (typeof options.showConsole === 'boolean') {
-        args.push('-console', options.showConsole ? 'true' : 'false');
-    }
-    if (options.debugLogFile) {
-        args.push('-write-debug-log', resolveOptionPath(runtimeRoot, options.debugLogFile));
-    }
-    if (options.position) {
-        args.push('-position', `${options.position.x},${options.position.y}`);
-    }
-    if (options.bindAddress) {
-        args.push('-listen', options.bindAddress);
-    }
-    if (options.searchPaths?.length) {
-        const searchPaths = options.searchPaths.map((searchPath) => resolveOptionPath(runtimeRoot, searchPath));
-        args.push('-search-path', searchPaths.join(';'));
-    }
-
-    return args;
 }
 
 async function resolveProjectPath(projectPath?: string): Promise<string> {
@@ -368,11 +125,14 @@ async function ensurePreviewServer(
     return normalizeServerURL(serverURL);
 }
 
-async function resolvePreviewData(startScene?: string, assetServerURL?: string): Promise<IPreviewData> {
+async function resolvePreviewData(
+    enginePath: string,
+    startScene?: string,
+    assetServerURL?: string,
+): Promise<IPreviewData> {
     const builder = await import('../builder');
     const { fillIncludeModulesFromProjectConfig } = await import('../builder/share/common-options-validator');
     const { assetManager } = await import('../assets');
-    const { Engine } = await import('../engine');
     const buildOptions = JSON.parse(JSON.stringify(
         await builder.queryDefaultBuildConfigByPlatform('windows'),
     ));
@@ -392,18 +152,30 @@ async function resolvePreviewData(startScene?: string, assetServerURL?: string):
 
     const settings = JSON.parse(JSON.stringify(result.settings));
     const bundleConfigs = JSON.parse(JSON.stringify(result.bundleConfigs || []));
-    const configuredFeatures = Array.isArray(Engine.getConfig().includeModules) ? Engine.getConfig().includeModules : [];
-    const previewFeatures = Array.isArray(settings.engine?.engineModules) ? settings.engine.engineModules : [];
-    const features = Array.from(new Set([
-        ...configuredFeatures,
-        ...previewFeatures,
-    ]));
+    // 与 editor simulator 保持一致：feature 集合完全取自预览 settings（由 getPreviewSettings
+    // 按项目 includeModules 生成），不再与 Engine.getConfig().includeModules 求并集。
+    // 求并集会把项目里关闭的模块（如 gfx-webgpu）重新写回 settings.engine.engineModules，
+    // 使「配置 feature / 实际 runtime 产物 / bootstrap feature」三者不一致。
+    const features = Array.isArray(settings.engine?.engineModules) ? settings.engine.engineModules : [];
 
     if (settings.splashScreen) {
         settings.splashScreen.totalTime = 0;
     }
-    if (settings.engine) {
-        settings.engine.engineModules = features;
+    // 预览构建的 internal bundle 会收集「全部」feature 的 dependentAssets（见 bundle/index.ts
+    // initBundleRootAssets），因为浏览器/场景编辑器预览跑的是完整引擎。simulator 不是：它的 cc
+    // 索引由 preview server 的 quick-pack 按项目 feature 生成，未选中的模块根本不在 runtime 里。
+    // 因此 builtinResMgr 预加载列表必须按 includeModules 裁剪，否则会去反序列化只有该模块才注册
+    // 的类型，例如内置物理材质 default-physics-material 用的旧类名 `cc.PhysicMaterial`
+    // （别名只在 physics-framework 的 deprecated.ts 注册），报
+    // "Can not find class 'cc.PhysicMaterial'" 后抛 "Cannot set properties of null (setting '_uuid')"。
+    if (Array.isArray(settings.engine?.builtinAssets)) {
+        const allowed = new Set(await resolvePreloadAssetList(enginePath, buildOptions.includeModules || []));
+        const kept = settings.engine.builtinAssets.filter((uuid: string) => allowed.has(uuid));
+        const dropped = settings.engine.builtinAssets.length - kept.length;
+        if (dropped > 0) {
+            console.debug(`[Simulator] Dropped ${dropped} builtin preload asset(s) not covered by project modules.`);
+        }
+        settings.engine.builtinAssets = kept;
     }
     if (assetServerURL) {
         settings.assets.server = normalizeServerURL(assetServerURL);
@@ -457,132 +229,6 @@ async function resolvePreviewSceneJson(
     return await readFile(scenePath, 'utf8');
 }
 
-async function generateBundleIndex(bundleName: string): Promise<string> {
-    const bundleEntry = bundleName === 'main' ? ['cce:/internal/x/prerequisite-imports'] : [];
-    return await ejs.renderFile(join(GlobalPaths.workspace, 'static', 'simulator', 'bundleIndex.ejs'), {
-        bundleName,
-        bundleEntry,
-    });
-}
-
-async function writeSettingsFiles(resourcesPath: string, previewData: IPreviewData): Promise<void> {
-    await ensureDir(join(resourcesPath, 'src'));
-    await writeFile(join(resourcesPath, 'src', 'settings.json'), `${JSON.stringify(previewData.settings, null, 2)}\n`, 'utf8');
-
-    for (const config of previewData.bundleConfigs) {
-        const outputConfig = JSON.parse(JSON.stringify(config));
-        delete outputConfig.importBase;
-        delete outputConfig.nativeBase;
-
-        const bundleDir = join(resourcesPath, 'assets', outputConfig.name);
-        await ensureDir(bundleDir);
-        await writeFile(join(bundleDir, 'cc.config.json'), `${JSON.stringify(outputConfig, null, 2)}\n`, 'utf8');
-        await writeFile(join(bundleDir, 'index.js'), await generateBundleIndex(outputConfig.name), 'utf8');
-    }
-}
-
-async function resolveBuiltRuntimeFeatureUnits(enginePath: string): Promise<string[]> {
-    const runtimeImportMapPath = join(GlobalPaths.workspace, 'static', 'simulator', 'import-map.json');
-    const runtimeImportMap = await readJSON(runtimeImportMapPath).catch(() => null) as {
-        imports?: Record<string, string>;
-    } | null;
-    if (!runtimeImportMap?.imports) {
-        return [];
-    }
-
-    const featureUnits: string[] = [];
-    for (const [specifier, target] of Object.entries(runtimeImportMap.imports)) {
-        if (specifier.includes('/') || specifier === 'cc/env' || specifier === 'cce.env') {
-            continue;
-        }
-        if (target !== `./cocos-js/${specifier}.js`) {
-            continue;
-        }
-        if (await pathExists(join(enginePath, 'bin', 'native-preview', `${specifier}.js`))) {
-            featureUnits.push(specifier);
-        }
-    }
-    return featureUnits;
-}
-
-async function writeRuntimeEngineBootstrap(resourcesPath: string, enginePath: string, features: string[]): Promise<void> {
-    const ccbuild = requireFromEngine<any>('@cocos/ccbuild', enginePath);
-    const { BuiltinModuleProvider } = requireFromEngine<any>('@cocos/lib-programming/dist/builtin-module-provider', enginePath);
-
-    const ccModuleFile = join(resourcesPath, 'src', 'cocos-js', 'cc.js');
-    const cceEnvFile = join(resourcesPath, 'src', 'builtin', 'cce.env.js');
-    await ensureDir(dirname(ccModuleFile));
-    await ensureDir(dirname(cceEnvFile));
-
-    const statsQuery = await ccbuild.StatsQuery.create(enginePath);
-    const ccEnvConstants = statsQuery.constantManager.genCCEnvConstants({
-        mode: 'PREVIEW',
-        platform: 'NATIVE',
-        flags: {
-            DEBUG: true,
-        },
-    });
-    const builtFeatureUnits = await resolveBuiltRuntimeFeatureUnits(enginePath);
-    const featureUnits = builtFeatureUnits.length > 0
-        ? builtFeatureUnits
-        : statsQuery.getUnitsOfFeatures(features);
-    const { code: indexMod } = await ccbuild.buildEngine.transform(
-        statsQuery.evaluateIndexModuleSource(featureUnits, (moduleName: string) => moduleName),
-        'system',
-    );
-    const builtinModuleProvider = await BuiltinModuleProvider.create({ format: 'systemjs' });
-    await builtinModuleProvider.addBuildTimeConstantsMod(ccEnvConstants);
-
-    await writeFile(ccModuleFile, indexMod, 'utf8');
-    await writeFile(cceEnvFile, builtinModuleProvider.modules['cc/env'], 'utf8');
-}
-
-async function writeSimulatorConfig(
-    writablePath: string,
-    options: Pick<ISimulatorPrepareOptions, 'waitForConnect' | 'landscape' | 'resolution'>,
-): Promise<string> {
-    await ensureDir(writablePath);
-    const configPath = join(writablePath, 'config.json');
-    const resolution = options.resolution || { width: 960, height: 640 };
-    await writeFile(configPath, `${JSON.stringify({
-        name: 'Simulator',
-        entry: 'main.js',
-        isLandscape: !!options.landscape,
-        isWindowTop: false,
-        waitForConnect: !!options.waitForConnect,
-        width: resolution.width,
-        height: resolution.height,
-        consolePort: 6050,
-        uploadPort: 6060,
-        debugPort: 5086,
-    }, null, 2)}\n`, 'utf8');
-    return configPath;
-}
-
-async function copyIfExists(src: string, dest: string): Promise<void> {
-    if (!(await pathExists(src))) {
-        return;
-    }
-    await ensureDir(dirname(dest));
-    await copy(src, dest, { overwrite: true });
-}
-
-async function assertRequiredSimulatorArtifacts(enginePath: string): Promise<void> {
-    const requiredPaths = [
-        join(enginePath, 'bin', 'native-preview'),
-        join(enginePath, 'bin', 'adapter', 'native', 'web-adapter.js'),
-        join(enginePath, 'bin', 'adapter', 'native', 'engine-adapter.js'),
-        join(GlobalPaths.workspace, 'static', 'simulator', 'import-map.json'),
-        join(GlobalPaths.workspace, 'static', 'simulator', 'system.bundle.js'),
-        join(GlobalPaths.workspace, 'static', 'simulator', 'polyfills.bundle.js'),
-    ];
-
-    for (const filePath of requiredPaths) {
-        if (!(await pathExists(filePath))) {
-            throw new Error(`Required simulator artifact is missing: ${filePath}. Run \`npm run build:simulator\` first.`);
-        }
-    }
-}
 
 class SimulatorManager {
     private readonly _sessions = new Map<string, ISimulatorSessionRecord>();
@@ -686,12 +332,14 @@ class SimulatorManager {
         }
         await assertRequiredSimulatorArtifacts(resolvedEnginePath);
 
-        const resourcesPath = getSimulatorResourcesPath(resolvedEnginePath);
-        const writablePath = getSimulatorWritablePath(resolvedEnginePath);
+        const { runtimeRoot: resourcesPath, writablePath } = resolvePrepareTargets({
+            ...options,
+            enginePath: resolvedEnginePath,
+        });
         const projectPath = await resolveProjectPath(options.projectPath);
         const serverURL = await resolveServerURL(options.serverURL);
         const resolvedStartScene = options.startScene || await resolveDefaultStartScene();
-        const previewData = await resolvePreviewData(resolvedStartScene, options.assetServerURL);
+        const previewData = await resolvePreviewData(resolvedEnginePath, resolvedStartScene, options.assetServerURL);
         const previewSceneJson = await resolvePreviewSceneJson(
             options.previewSceneJson,
             resolvedStartScene || previewData.settings?.launch?.launchScene || '',
@@ -700,11 +348,19 @@ class SimulatorManager {
         await ensureDir(join(resourcesPath, 'jsb-adapter'));
         await ensureDir(join(resourcesPath, 'src', 'cocos-js'));
         await emptyDir(join(resourcesPath, 'assets'));
+        // 旧版本会在这里生成 simulator 专用的 cc 索引模块；现已改为走 preview server 的
+        // quick-pack 产物，遗留文件必须清掉，否则会被误当成引擎 feature unit 产物。
+        await remove(join(resourcesPath, 'src', 'cocos-js', 'cc.js'));
         if (options.cleanCaches) {
+            // 引擎的 gamecaches 落在 native 的 writable path 下。macOS 上 writablePath 就是
+            // Resources；Windows 上是 %LOCALAPPDATA%/<App>/debugruntime，两处都要清。
             await emptyDir(join(resourcesPath, 'gamecaches'));
+            if (resolve(writablePath) !== resolve(resourcesPath)) {
+                await emptyDir(join(writablePath, 'gamecaches'));
+            }
         }
 
-        await writeRuntimeEngineBootstrap(resourcesPath, resolvedEnginePath, previewData.features);
+        await writeRuntimeEngineBootstrap(resourcesPath, resolvedEnginePath);
 
         await copyIfExists(
             join(resolvedEnginePath, 'bin', 'adapter', 'native', 'web-adapter.js'),
@@ -742,8 +398,6 @@ class SimulatorManager {
         const previewSceneJsonPath = join(resourcesPath, 'preview-scene.json');
         await writeFile(previewSceneJsonPath, previewSceneJson, 'utf8');
 
-        const { previewIp, previewPort } = parsePreviewServer(serverURL);
-        const libraryPath = formatPath(join(projectPath, 'library'));
         const mainScriptPath = join(resourcesPath, 'main.js');
         const settingsPath = join(resourcesPath, 'src', 'settings.json');
         const applicationScriptPath = join(resourcesPath, 'src', 'application.js');
@@ -752,33 +406,21 @@ class SimulatorManager {
             height: options.resolution?.height || 640,
             policy: ResolutionPolicy.ResolutionShowAll,
         };
-        const mainJsSource = await ejs.renderFile(join(GlobalPaths.workspace, 'static', 'simulator', 'main.ejs'), {
-            libraryPath,
-            waitForConnect: !!options.waitForConnect,
-            projectPath: formatPath(projectPath),
-            previewIp,
-            previewPort,
-            packImportMapURL: '/scripting/x/pack-import-map-url',
-            packResolutionDetailMapURL: '/scripting/x/resolution-detail-map.json',
-        });
-        await writeFile(mainScriptPath, mainJsSource, 'utf8');
+        await writeFile(mainScriptPath, await renderMainScript({
+            serverURL,
+            projectPath,
+            waitForConnect: options.waitForConnect,
+        }), 'utf8');
 
-        const appJsSource = await ejs.renderFile(join(GlobalPaths.workspace, 'static', 'simulator', 'application.ejs'), {
+        await writeFile(applicationScriptPath, await renderApplicationScript({
+            serverURL,
+            projectPath,
+            previewSceneJsonPath,
             hasPhysicsAmmo: previewData.features.includes('physics-ammo'),
-            previewSceneJsonPath: formatPath(previewSceneJsonPath),
-            libraryPath,
-            projectPath: formatPath(projectPath),
-            designResolution: {
-                width: designResolution.width,
-                height: designResolution.height,
-                resolutionPolicy: designResolution.policy,
-            },
-            previewIp,
-            previewPort,
-        });
-        await writeFile(applicationScriptPath, appJsSource, 'utf8');
+            designResolution,
+        }), 'utf8');
 
-        const configPath = await writeSimulatorConfig(writablePath, {
+        const configPaths = await writeSimulatorConfig([resourcesPath, writablePath], {
             waitForConnect: options.waitForConnect,
             landscape: options.landscape,
             resolution: options.resolution || {
@@ -797,7 +439,8 @@ class SimulatorManager {
             settingsPath,
             mainScriptPath,
             applicationScriptPath,
-            configPath,
+            configPath: configPaths[0],
+            configPaths,
         };
     }
 
