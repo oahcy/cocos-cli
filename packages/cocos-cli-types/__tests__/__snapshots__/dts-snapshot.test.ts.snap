@@ -7908,6 +7908,9 @@ export declare interface BitmapFontAssetUserData {
     fontSize: number;
     textureUuid: string;
 }
+export declare function build(enginePath?: string): Promise<void>;
+export declare function buildNative(enginePath?: string): Promise<void>;
+export declare function buildRuntime(enginePath?: string): Promise<void>;
 export declare interface CategoryDetail extends CategoryInfo {
     modules: IModules;
 }
@@ -8100,11 +8103,14 @@ export declare function get<T>(key: string, scope?: ConfigurationScope): Promise
 export declare function get_2(): Promise<Project_2>;
 export declare function getConfig(useDefault?: boolean): Promise<IEngineConfig>;
 export declare function getConfigPath(scope?: ConfigurationScope): Promise<string>;
+export declare function getExecutablePath(enginePath?: string): Promise<string | null>;
 export declare function getInfo(): Promise<EngineInfo>;
 export declare function getInfo_2(): Promise<ProjectInfo>;
+export declare function getManifest(enginePath?: string): Promise<ISimulatorManifest | null>;
 export declare function getMetadata(): Promise<ICocosConfigurationNode[]>;
 export declare function getProgrammingFacet(): Promise<ProgrammingFacet>;
 export declare function getRenderConfig(): Promise<ModuleRenderConfig>;
+export declare function getResourcesPath(enginePath?: string): Promise<string>;
 export declare function getStatus(): {
     registered: boolean;
     url?: string;
@@ -8113,7 +8119,9 @@ export declare function getStatus_2(): {
     running: boolean;
     url?: string;
 };
+export declare function getStatus_3(id: string): Promise<ISimulatorSessionInfo | null>;
 export declare function getUrl(): string | undefined;
+export declare function getWritablePath(enginePath?: string): Promise<string>;
 export declare interface GltfAnimationAssetUserData {
     gltfIndex: number;
     events: Array<{
@@ -8645,6 +8653,84 @@ export declare interface IResolvedCustomJointTextureLayout {
     textureLength: number;
     contents: IResolvedChunkContent[];
 }
+export declare function isAvailable(enginePath?: string): Promise<boolean>;
+export declare function isBuilt(enginePath?: string): Promise<boolean>;
+export declare interface ISimulatorLaunchPreviewOptions extends ISimulatorPrepareOptions, Omit<ISimulatorStartOptions, 'runtimeRoot' | 'projectDir' | 'entryFile' | 'writablePath'> {
+    port?: number;
+    previewMode?: 'game' | 'scene-editor';
+}
+export declare interface ISimulatorLaunchPreviewResult {
+    prepared: ISimulatorPreparedResources;
+    session: ISimulatorSessionInfo;
+}
+export declare interface ISimulatorManifest {
+    platform: NodeJS.Platform;
+    bundle: string;
+    entry: string;
+    builtAt?: string;
+}
+export declare interface ISimulatorPreparedResources {
+    runtimeRoot: string;
+    writablePath: string;
+    executablePath: string;
+    projectPath: string;
+    serverURL: string;
+    previewSceneJsonPath: string;
+    settingsPath: string;
+    mainScriptPath: string;
+    applicationScriptPath: string;
+    configPath: string;
+}
+export declare interface ISimulatorPrepareOptions {
+    enginePath?: string;
+    projectPath?: string;
+    serverURL?: string;
+    assetServerURL?: string;
+    startScene?: string;
+    previewSceneJson?: string | Record<string, unknown>;
+    waitForConnect?: boolean;
+    resolution?: ISimulatorResolution;
+    landscape?: boolean;
+    cleanCaches?: boolean;
+}
+export declare interface ISimulatorResolution {
+    width: number;
+    height: number;
+}
+export declare interface ISimulatorSessionInfo {
+    id: string;
+    pid?: number;
+    status: SimulatorStatus;
+    startedAt?: string;
+    exitedAt?: string;
+    exitCode?: number | null;
+    signal?: NodeJS.Signals | string | null;
+    runtimeRoot: string;
+    projectDir: string;
+    enginePath: string;
+    executablePath: string;
+    args: string[];
+}
+export declare interface ISimulatorStartOptions {
+    runtimeRoot?: string;
+    projectDir?: string;
+    enginePath?: string;
+    entryFile?: string;
+    writablePath?: string;
+    searchPaths?: string[];
+    resolution?: ISimulatorResolution;
+    scale?: number;
+    landscape?: boolean;
+    portrait?: boolean;
+    showConsole?: boolean;
+    debugLogFile?: string;
+    position?: {
+        x: number;
+        y: number;
+    };
+    bindAddress?: string;
+    env?: Record<string, string | undefined>;
+}
 export declare interface ISocketConfig {
     connection: (socket: any) => void;
     disconnect: (socket: any) => void;
@@ -8739,6 +8825,8 @@ export declare interface LabelAtlasAssetUserData {
     spriteFrameUuid: string;
     _fntConfig: FntData;
 }
+export declare function launchPreview(options?: ISimulatorLaunchPreviewOptions): Promise<ISimulatorLaunchPreviewResult>;
+export declare function listSessions(): Promise<ISimulatorSessionInfo[]>;
 export declare interface LODsOption {
     screenRatio: number;
     faceCount: number;
@@ -8942,6 +9030,7 @@ export declare interface PrefabAssetUserData {
     persistent?: boolean;
     syncNodeName?: string;
 }
+export declare function prepareResources(options?: ISimulatorPrepareOptions): Promise<ISimulatorPreparedResources>;
 export declare class ProgrammingFacet {
     private _packerDriverUpdateCount;
     private _asyncIteration;
@@ -9074,6 +9163,7 @@ export declare interface RenderTextureAssetUserData extends TextureBaseAssetUser
     width: number;
     height: number;
 }
+export declare function restart(id: string): Promise<ISimulatorSessionInfo>;
 export declare interface RtSpriteFrameAssetUserData {
     imageUuidOrDatabaseUri: string;
     width?: number;
@@ -9160,6 +9250,35 @@ export declare interface SimplifyOptions {
     agressiveness?: number;
     maxIterationCount?: number;
 }
+export declare namespace Simulator {
+    export {
+        buildNative,
+        buildRuntime,
+        prepareResources,
+        launchPreview,
+        build,
+        isBuilt,
+        isAvailable,
+        getManifest,
+        getExecutablePath,
+        getResourcesPath,
+        getWritablePath,
+        start_3 as start,
+        stop_3 as stop,
+        restart,
+        getStatus_3 as getStatus,
+        listSessions,
+        ISimulatorLaunchPreviewOptions,
+        ISimulatorLaunchPreviewResult,
+        ISimulatorManifest,
+        ISimulatorPreparedResources,
+        ISimulatorPrepareOptions,
+        ISimulatorResolution,
+        ISimulatorSessionInfo,
+        ISimulatorStartOptions
+    }
+}
+export declare type SimulatorStatus = 'running' | 'stopped';
 export declare interface SpineAssetUserData {
     atlasUuid: string;
 }
@@ -9208,10 +9327,12 @@ export declare interface SpriteFrameVertices {
 }
 export declare function start(): Promise<void>;
 export declare function start_2(port?: number, host?: string): Promise<string>;
+export declare function start_3(options: ISimulatorStartOptions): Promise<ISimulatorSessionInfo>;
 export declare function startCompileScript(assetChanges?: AssetChangeInfo[]): Promise<void>;
 export declare function startEngineCompilation(force?: boolean): Promise<void>;
 export declare function startupWorker(projectPath: string): Promise<void>;
 export declare function stop_2(): Promise<void>;
+export declare function stop_3(id: string): Promise<boolean>;
 export declare const SUPPORT_CREATE_TYPES: readonly ["animation-clip", "typescript", "auto-atlas", "effect", "scene", "prefab", "material", "texture-cube", "terrain", "physics-material", "label-atlas", "render-texture", "directory", "effect-header"];
 export declare enum TangentImportSetting {
     exclude = 0,
