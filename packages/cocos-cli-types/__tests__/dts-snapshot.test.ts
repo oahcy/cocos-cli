@@ -13,6 +13,7 @@ const dtsFiles = [
     'engine.d.ts',
     'project.d.ts',
     'scripting.d.ts',
+    'simulator.d.ts',
 ];
 
 function stripComments(content: string): string {

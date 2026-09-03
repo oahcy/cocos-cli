@@ -150,9 +150,8 @@ describe('formatPath', () => {
 });
 
 describe('resolveRuntimeRoot / resolveOptionPath', () => {
-    it('prefers runtimeRoot over the deprecated projectDir alias', () => {
-        expect(resolveRuntimeRoot({ runtimeRoot: '/a/b', projectDir: '/c/d' }, MAC)).toBe(resolve('/a/b'));
-        expect(resolveRuntimeRoot({ projectDir: '/c/d' }, MAC)).toBe(resolve('/c/d'));
+    it('honours an explicit runtimeRoot', () => {
+        expect(resolveRuntimeRoot({ runtimeRoot: '/a/b', enginePath: ENGINE }, MAC)).toBe(resolve('/a/b'));
     });
 
     it('falls back to the simulator resources path', () => {

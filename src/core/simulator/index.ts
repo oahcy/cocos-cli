@@ -1,7 +1,9 @@
 import { randomUUID } from 'crypto';
 import { spawn, type ChildProcess } from 'child_process';
+import { EventEmitter } from 'events';
 import { emptyDir, ensureDir, pathExists, readFile, remove, stat, writeFile } from 'fs-extra';
 import { join, resolve } from 'path';
+import treeKill from 'tree-kill';
 import { GlobalPaths } from '../../global';
 import {
     ResolutionPolicy,
@@ -29,8 +31,10 @@ import {
     type IPreviewData,
 } from './runtime-writer';
 import type {
+    ISimulatorBuildState,
     ISimulatorLaunchPreviewOptions,
     ISimulatorLaunchPreviewResult,
+    ISimulatorLogEntry,
     ISimulatorManifest,
     ISimulatorPrepareOptions,
     ISimulatorPreparedResources,
@@ -40,8 +44,10 @@ import type {
 } from './internal';
 
 export type {
+    ISimulatorBuildState,
     ISimulatorLaunchPreviewOptions,
     ISimulatorLaunchPreviewResult,
+    ISimulatorLogEntry,
     ISimulatorManifest,
     ISimulatorPrepareOptions,
     ISimulatorPreparedResources,
@@ -52,9 +58,44 @@ export type {
 
 interface ISimulatorSessionRecord {
     child: ChildProcess;
-    startOptions: ISimulatorStartOptions;
     info: ISimulatorSessionInfo;
 }
+
+/** 事件名。对外一律通过 `onXxx(listener) => dispose` 暴露，不导出这些字面量。 */
+const EVENT_SESSION = 'session';
+const EVENT_LOG = 'log';
+const EVENT_BUILD_STATE = 'build-state';
+
+/**
+ * 把子进程的一路输出按行拆开交给 `onLine`。
+ *
+ * 按行而不是按 chunk 是因为 `data` 事件的边界与换行无关，直接抛 chunk 会把一行日志
+ * 劈成两个事件。尾部不完整的一段留在缓冲里，等下一个 chunk 或 `flush()`。
+ */
+function pipeLines(stream: NodeJS.ReadableStream | null, onLine: (line: string) => void): () => void {
+    if (!stream) {
+        return () => { /* 没有这一路输出，nothing to flush */ };
+    }
+
+    let buffered = '';
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk: string) => {
+        buffered += chunk;
+        const lines = buffered.split(/\r?\n/);
+        buffered = lines.pop() ?? '';
+        for (const line of lines) {
+            onLine(line);
+        }
+    });
+
+    return () => {
+        if (buffered) {
+            onLine(buffered);
+            buffered = '';
+        }
+    };
+}
+
 
 async function resolveProjectPath(projectPath?: string): Promise<string> {
     if (projectPath) {
@@ -230,8 +271,78 @@ async function resolvePreviewSceneJson(
 }
 
 
-class SimulatorManager {
+class SimulatorManager extends EventEmitter {
     private readonly _sessions = new Map<string, ISimulatorSessionRecord>();
+    /**
+     * 同一份产物目录上的写操作去重。构建脚本和 `prepareResources` 都是「清空再写」，
+     * 并行跑两次结果不确定。先例见 `lib/mcp` 的 `registeringPromise ??= doRegisterMcp()`。
+     */
+    private readonly _inFlight = new Map<string, Promise<unknown>>();
+    private _projectPath = '';
+    private _exitCleanupInstalled = false;
+
+    /**
+     * 由宿主（Pink 的 cocosHost 基类会在模块加载后自动调用）传入当前工程路径，
+     * 之后 `prepareResources` / `launchPreview` 就不必每次都带 `projectPath`。
+     */
+    async init(projectPath: string): Promise<void> {
+        this._projectPath = projectPath ? resolve(projectPath) : '';
+    }
+
+    /**
+     * 会话状态变化：spawn 成功、首个 stdout（readyAt）、exit、error、stop 各一次。
+     *
+     * 对应 editor 的两个进程内监听：`simulatorProcess.on('close')`（用来关调试面板）和
+     * `runSimulator(onCompleted)` 的首个 stdout 回调。合成一个事件是刻意的 ——
+     * Pink 每个事件都要单独订阅 + 转发 + 声明 d.ts，而 `status` / `readyAt` / `exitCode`
+     * 已经够区分这几种情形。
+     */
+    onDidChangeSession(listener: (session: ISimulatorSessionInfo) => void): () => void {
+        this.on(EVENT_SESSION, listener);
+        return () => {
+            this.removeListener(EVENT_SESSION, listener);
+        };
+    }
+
+    /** simulator 进程与构建脚本的逐行输出。对应 editor 的 stdout/stderr → console。 */
+    onLog(listener: (entry: ISimulatorLogEntry) => void): () => void {
+        this.on(EVENT_LOG, listener);
+        return () => {
+            this.removeListener(EVENT_LOG, listener);
+        };
+    }
+
+    /** 构建开始 / 成功 / 失败。对应 editor 的 `programming:compile-start` / `compiled` 广播。 */
+    onDidChangeBuildState(listener: (state: ISimulatorBuildState) => void): () => void {
+        this.on(EVENT_BUILD_STATE, listener);
+        return () => {
+            this.removeListener(EVENT_BUILD_STATE, listener);
+        };
+    }
+
+    private _emitSession(info: ISimulatorSessionInfo): void {
+        this.emit(EVENT_SESSION, { ...info });
+    }
+
+    private _emitLog(entry: ISimulatorLogEntry): void {
+        this.emit(EVENT_LOG, entry);
+    }
+
+    private _emitBuildState(state: ISimulatorBuildState): void {
+        this.emit(EVENT_BUILD_STATE, state);
+    }
+
+    private _dedupe<T>(key: string, task: () => Promise<T>): Promise<T> {
+        const existing = this._inFlight.get(key) as Promise<T> | undefined;
+        if (existing) {
+            return existing;
+        }
+        const promise = task().finally(() => {
+            this._inFlight.delete(key);
+        });
+        this._inFlight.set(key, promise);
+        return promise;
+    }
 
     async getManifest(enginePath?: string): Promise<ISimulatorManifest | null> {
         const manifest = getHostManifest();
@@ -257,10 +368,6 @@ class SimulatorManager {
         return pathExists(join(getSimulatorDir(enginePath), manifest.entry));
     }
 
-    async isAvailable(enginePath?: string): Promise<boolean> {
-        return this.isBuilt(enginePath);
-    }
-
     getResourcesPath(enginePath?: string): string {
         return getSimulatorResourcesPath(enginePath);
     }
@@ -279,44 +386,66 @@ class SimulatorManager {
         return await pathExists(executablePath) ? executablePath : null;
     }
 
-    async buildNative(enginePath?: string): Promise<void> {
-        const buildScript = join(GlobalPaths.workspace, 'workflow', 'build-simulator.js');
+    /**
+     * 跑一个构建脚本，广播 start / success / failed，并把逐行输出同时送进 `onLog` 和 console。
+     *
+     * stdio 从 `'inherit'` 改成 pipe 是为了能抛 `onLog`；`console.log` 那一行不能省——
+     * 之前 inherit 时输出直接流到宿主 stdout（CLI 直跑的终端、或 Pink 的 cocosHost 日志），
+     * 改 pipe 会把这条路断掉。
+     */
+    private async _runBuildScript(step: ISimulatorBuildState['step'], scriptName: string, enginePath?: string): Promise<void> {
+        const buildScript = join(GlobalPaths.workspace, 'workflow', scriptName);
         const resolvedEnginePath = resolveEnginePath(enginePath);
-        await new Promise<void>((resolvePromise, reject) => {
-            const child = spawn(process.execPath, [buildScript, `--enginePath=${resolvedEnginePath}`], {
-                cwd: GlobalPaths.workspace,
-                stdio: 'inherit',
-                env: process.env,
+        const failure = step === 'native' ? 'Simulator build' : 'Simulator runtime build';
+
+        this._emitBuildState({ step, state: 'start' });
+        try {
+            await new Promise<void>((resolvePromise, reject) => {
+                const child = spawn(process.execPath, [buildScript, `--enginePath=${resolvedEnginePath}`], {
+                    cwd: GlobalPaths.workspace,
+                    stdio: ['ignore', 'pipe', 'pipe'],
+                    env: process.env,
+                });
+
+                const flushOut = pipeLines(child.stdout, (message) => {
+                    this._emitLog({ source: 'build', level: 'log', message });
+                    console.log(message);
+                });
+                const flushErr = pipeLines(child.stderr, (message) => {
+                    this._emitLog({ source: 'build', level: 'error', message });
+                    console.error(message);
+                });
+
+                child.on('error', (error) => {
+                    flushOut();
+                    flushErr();
+                    reject(error);
+                });
+                child.on('close', (code) => {
+                    flushOut();
+                    flushErr();
+                    if (code === 0) {
+                        resolvePromise();
+                    } else {
+                        reject(new Error(`${failure} failed with exit code ${code}`));
+                    }
+                });
             });
-            child.on('error', reject);
-            child.on('close', (code) => {
-                if (code === 0) {
-                    resolvePromise();
-                } else {
-                    reject(new Error(`Simulator build failed with exit code ${code}`));
-                }
-            });
-        });
+        } catch (error) {
+            this._emitBuildState({ step, state: 'failed', error: (error as Error).message });
+            throw error;
+        }
+        this._emitBuildState({ step, state: 'success' });
+    }
+
+    async buildNative(enginePath?: string): Promise<void> {
+        const resolvedEnginePath = resolveEnginePath(enginePath);
+        return this._dedupe(`build:native:${resolvedEnginePath}`, () => this._runBuildScript('native', 'build-simulator.js', resolvedEnginePath));
     }
 
     async buildRuntime(enginePath?: string): Promise<void> {
-        const buildScript = join(GlobalPaths.workspace, 'workflow', 'build-simulator-runtime.js');
         const resolvedEnginePath = resolveEnginePath(enginePath);
-        await new Promise<void>((resolvePromise, reject) => {
-            const child = spawn(process.execPath, [buildScript, `--enginePath=${resolvedEnginePath}`], {
-                cwd: GlobalPaths.workspace,
-                stdio: 'inherit',
-                env: process.env,
-            });
-            child.on('error', reject);
-            child.on('close', (code) => {
-                if (code === 0) {
-                    resolvePromise();
-                } else {
-                    reject(new Error(`Simulator runtime build failed with exit code ${code}`));
-                }
-            });
-        });
+        return this._dedupe(`build:runtime:${resolvedEnginePath}`, () => this._runBuildScript('runtime', 'build-simulator-runtime.js', resolvedEnginePath));
     }
 
     async build(enginePath?: string): Promise<void> {
@@ -324,7 +453,22 @@ class SimulatorManager {
         await this.buildRuntime(enginePath);
     }
 
+    /**
+     * 准备 runtime 产物。
+     *
+     * 并发调用按输出目录去重：整个流程是「清空 assets / 删旧 cc.js / 重写 settings」，
+     * 两次并行跑会互相踩，产物落到谁的中间态都不确定。去重后至少是「其中一次的完整结果」。
+     * 需要两份互不干扰的产物时传不同的 `runtimeRoot`。
+     */
     async prepareResources(options: ISimulatorPrepareOptions = {}): Promise<ISimulatorPreparedResources> {
+        const { runtimeRoot } = resolvePrepareTargets({
+            ...options,
+            enginePath: resolveEnginePath(options.enginePath),
+        });
+        return this._dedupe(`prepare:${runtimeRoot}`, () => this._prepareResources(options));
+    }
+
+    private async _prepareResources(options: ISimulatorPrepareOptions = {}): Promise<ISimulatorPreparedResources> {
         const resolvedEnginePath = resolveEnginePath(options.enginePath);
         const executablePath = await this.getExecutablePath(resolvedEnginePath);
         if (!executablePath) {
@@ -444,8 +588,20 @@ class SimulatorManager {
         };
     }
 
+    /**
+     * 单实例预览入口：**先停掉现有会话再起新的**。
+     *
+     * 对齐 editor —— `runSimulator` 第一句就是 `stopSimulatorProcess()`
+     * （`app/builtin/preview/source/browser/simulator.ts:100`），所以它既是「启动」也是「重启」，
+     * 调试面板改分辨率 / 朝向走的就是 `restart-simulator` → `runSimulator()`。
+     *
+     * 停在 `prepareResources` **之前**也是照 editor 的顺序：准备流程会清空并重写 runtime 目录，
+     * 而正在跑的 simulator 正打开着那批文件（Windows 上会直接锁住）。
+     */
     async launchPreview(options: ISimulatorLaunchPreviewOptions = {}): Promise<ISimulatorLaunchPreviewResult> {
-        const projectPath = await resolveProjectPath(options.projectPath);
+        await this.stopAll();
+
+        const projectPath = await resolveProjectPath(options.projectPath || this._projectPath);
         const serverURL = await ensurePreviewServer(projectPath, options);
         const prepared = await this.prepareResources({
             ...options,
@@ -494,7 +650,10 @@ class SimulatorManager {
         const child = spawn(executablePath, args, {
             cwd: runtimeRoot,
             windowsHide: true,
-            stdio: 'ignore',
+            // 必须 pipe：native simulator 的 JS 报错、`cc.log`、引擎日志全走这两路。
+            // 之前是 `'ignore'`，等于把唯一的调试通道丢掉了。editor 同样是 piped + console
+            // （`simulator.ts:295-304`）。
+            stdio: ['ignore', 'pipe', 'pipe'],
             env: {
                 ...process.env,
                 ...options.env,
@@ -508,40 +667,59 @@ class SimulatorManager {
             status: 'running',
             startedAt: new Date().toISOString(),
             runtimeRoot,
-            projectDir: runtimeRoot,
             enginePath: resolvedEnginePath,
             executablePath,
             args,
         };
 
+        // editor 判定「起来了」用的就是首个 stdout 数据（`simulator.ts:296` 的 firstMetrics），
+        // 这里挂在原始 `data` 上而不是 pipeLines 的整行回调，免得首段输出不含换行时判定被推迟。
+        child.stdout?.once('data', () => {
+            const record = this._sessions.get(id);
+            if (!record || record.info.readyAt) {
+                return;
+            }
+            record.info.readyAt = new Date().toISOString();
+            this._emitSession(record.info);
+        });
+
+        const flushOut = pipeLines(child.stdout, (message) => {
+            this._emitLog({ source: 'simulator', level: 'log', message, sessionId: id });
+            console.log(message);
+        });
+        const flushErr = pipeLines(child.stderr, (message) => {
+            this._emitLog({ source: 'simulator', level: 'error', message, sessionId: id });
+            console.error(message);
+        });
+
         child.on('exit', (code, signal) => {
+            flushOut();
+            flushErr();
             const record = this._sessions.get(id);
             if (!record) {
                 return;
             }
             markSessionStopped(record.info, code, signal);
+            this._emitSession(record.info);
         });
 
         child.on('error', (error) => {
+            flushOut();
+            flushErr();
             const record = this._sessions.get(id);
             if (!record) {
                 return;
             }
             markSessionStopped(record.info, -1, null);
             console.error('[Simulator] failed to start:', error);
+            this._emitLog({ source: 'simulator', level: 'error', message: `failed to start: ${error.message}`, sessionId: id });
+            this._emitSession(record.info);
         });
 
-        this._sessions.set(id, {
-            child,
-            startOptions: {
-                ...options,
-                runtimeRoot,
-                writablePath: options.writablePath || getSimulatorWritablePath(resolvedEnginePath),
-                enginePath: resolvedEnginePath,
-                projectDir: runtimeRoot,
-            },
-            info,
-        });
+        this._sessions.set(id, { child, info });
+
+        this._installExitCleanup();
+        this._emitSession(info);
 
         return { ...info };
     }
@@ -555,45 +733,80 @@ class SimulatorManager {
         const child = record.child;
         const waitForExit = new Promise<void>((resolve) => {
             let settled = false;
+            let timer: ReturnType<typeof setTimeout>;
             const done = () => {
                 if (settled) {
                     return;
                 }
                 settled = true;
+                clearTimeout(timer);
                 child.off('exit', done);
                 child.off('error', done);
                 resolve();
             };
             child.once('exit', done);
             child.once('error', done);
-            setTimeout(done, 3000);
+            timer = setTimeout(done, 3000);
         });
 
         if (child.pid) {
-            try {
-                process.kill(child.pid, 'SIGTERM');
-            } catch (error: any) {
-                if (error?.code !== 'ESRCH') {
-                    throw error;
-                }
-            }
+            // 用 treeKill 而不是裸 process.kill：simulator 可能带子进程，裸 kill 只干掉父进程
+            // 会留下孤儿。editor 同样用它（`simulator.ts:5` / `23`）。
+            // 回调里的错误一律忽略——treeKill 靠 `pgrep` / `taskkill` 枚举进程树，
+            // 进程恰好已经自己退了就会报错，那正是我们想要的结果。
+            await new Promise<void>((resolveKill) => {
+                treeKill(child.pid!, 'SIGTERM', () => resolveKill());
+            });
         }
 
         await waitForExit;
         if (record.info.status === 'running') {
             markSessionStopped(record.info, null, 'SIGTERM');
+            this._emitSession(record.info);
         }
         return true;
     }
 
-    async restart(id: string): Promise<ISimulatorSessionInfo> {
-        const record = this._sessions.get(id);
-        if (!record) {
-            throw new Error(`Simulator session not found: ${id}`);
-        }
+    /**
+     * 停掉所有还在跑的会话，返回实际停掉的个数。
+     *
+     * editor 没有对应物（它退出时压根不清理），但 Pink 的 cocosHost 是按工程拉起的
+     * utility process，关工程 / 切工程就会被杀，频率远高于 editor 退出。见
+     * `docs/simulator-pink-interface.md` 6.1。
+     */
+    async stopAll(): Promise<number> {
+        const runningIds = Array.from(this._sessions.values())
+            .filter((record) => record.info.status === 'running')
+            .map((record) => record.info.id);
+        const stopped = await Promise.all(runningIds.map((id) => this.stop(id)));
+        return stopped.filter(Boolean).length;
+    }
 
-        await this.stop(id);
-        return this.start(record.startOptions);
+    /**
+     * `process.on('exit')` 兜底：Pink 直接 `process.kill()` 掉 cocosHost 时 facade 没机会被调用，
+     * 而 POSIX 下父进程被杀不会连带杀子进程 —— simulator 窗口会留着、5086 调试端口被占。
+     *
+     * exit 回调里不能 await，所以只能同步 `process.kill(pid, 'SIGKILL')`，拿不到 treeKill
+     * 的进程树能力，属于 best-effort。优雅退出请显式调 {@link stopAll}。
+     * 挂载放在 `start()` 里而不是构造函数，免得只 import 这个模块也白挂一个监听。
+     */
+    private _installExitCleanup(): void {
+        if (this._exitCleanupInstalled) {
+            return;
+        }
+        this._exitCleanupInstalled = true;
+        process.on('exit', () => {
+            for (const record of this._sessions.values()) {
+                if (record.info.status !== 'running' || !record.info.pid) {
+                    continue;
+                }
+                try {
+                    process.kill(record.info.pid, 'SIGKILL');
+                } catch {
+                    // 已经退了，无所谓
+                }
+            }
+        });
     }
 
     getStatus(id: string): ISimulatorSessionInfo | null {

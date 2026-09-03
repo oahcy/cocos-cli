@@ -22,7 +22,7 @@
 - 可以准备 simulator 所需 `Resources`
 - 可以从 `cocos-cli` 直接启动 preview server + 启动 simulator
 - 已经在项目 `~/project/steamTestCase` 上验证可以进入场景并稳定出帧
-- 有 110 个单测覆盖构建产物一致性、Windows 路径逻辑和 `prepareResources` 端到端产物
+- 有 134 个单测覆盖构建产物一致性、Windows 路径逻辑和 `prepareResources` 端到端产物
 
 已接入的构建入口：
 
@@ -143,7 +143,7 @@ Windows 与 macOS 的差异集中在两处，都已按 native 侧实现对齐：
 
 ## 自动化测试
 
-`npx jest tests/simulator-` —— 110 个用例，四个 suite：
+`npx jest tests/simulator-` —— 134 个用例，六个 suite：
 
 | 文件 | 覆盖 |
 | --- | --- |
@@ -151,6 +151,8 @@ Windows 与 macOS 的差异集中在两处，都已按 native 侧实现对齐：
 | `tests/simulator-build-artifacts.test.ts`（22） | `workflow/build-simulator.js` 与 `internal.ts` 的产物表逐字段一致；`import-map.json` 与 `buildImportMap()` 往返一致、不含 bare alias / `cc` / `cce:/internal/x/cc`；`main.ejs` 的 bootstrap 约定（无 eager import、`cce:/internal/x/` 只出现一次） |
 | `tests/simulator-runtime-writer.test.ts`（23） | settings / bundle 索引 / `cc/env` 产物、模板渲染（无残留 `<%`、能过 `new Function`、Windows 路径转正斜杠）、产物缺失时的报错信息 |
 | `tests/simulator-prepare-resources.test.ts`（17） | `prepareResources()` 端到端：产物落点、`builtinAssets` 裁剪、bundle 清理与远端前缀剥离、引擎产物拷贝、`main.js` / `application.js` / `config.json` 内容、幂等性 |
+| `tests/simulator-manager.test.ts`（20） | `SimulatorManager` 的进程编排：stdio pipe 与逐行 `onLog`、会话事件（start / readyAt / exit / error / stop）、`treeKill` 停进程、构建事件广播与 `_dedupe` 去重、`launchPreview` 先停后起 |
+| `tests/simulator-facade.test.ts`（4） | 对外命令层 `src/lib/simulator/simulator.ts` 的导出签名：19 个函数、`onXxx` 返回反订阅函数、`isAvailable` / `restart` 不存在 |
 
 `prepareResources` 的端到端测试靠 `runtimeRoot` 入参把产物写进临时目录（见下节），
 只 mock 掉需要真实项目 / preview server 的三个依赖（builder、asset-db、includeModules 校验），
@@ -216,8 +218,18 @@ npx jest tests/simulator-
 
 不需要启动 simulator 窗口，也不会碰 app bundle 里的 runtime 目录
 （`prepareResources` 的端到端用例走 `runtimeRoot` 入参写临时目录）。
-`assertRequiredSimulatorArtifacts` 那条用例会对着本地引擎产物断言，如果它红了说明本地没跑过
-`npm run build:simulator`。
+
+**前置条件：先跑过一次 `npm run build:simulator`。** 四个 suite 里只有
+`simulator-build-artifacts` 的一部分是纯静态断言，其余都依赖构建产物：
+
+| 依赖 | 谁生成 | 是否进版本库 |
+| --- | --- | --- |
+| `static/simulator/{import-map.json,system.bundle.js,polyfills.bundle.js}` | `workflow/build-simulator-runtime.js` | **否**，已加进 `.gitignore` |
+| `packages/engine/bin/**`（native-preview、adapter、`src/cocos-js/*`） | `npm run build:simulator:runtime` | 否，`packages/engine` 是软链 |
+| `packages/engine/native/simulator/Release/SimulatorApp-*` | `npm run build:simulator:native` | 否 |
+
+所以新克隆的仓库不构建是跑不了完整 suite 的，这是刻意的。缺东西时的报错会直接指出该跑哪条命令
+（`assertRequiredSimulatorArtifacts` 和 `readImportMap` 都带了提示）。
 
 ### 3. 只重建 simulator runtime
 
@@ -409,7 +421,7 @@ NODE
 - bootstrap / import-map 已与 editor 对齐，之前的四处兼容补丁全部拆除；
   配置 feature → 实际产物 → bootstrap feature 现在是天然一致的，不再靠兜底筛选。
 - Windows 的路径 / writable path / `config.json` 双写逻辑已按 native 实现对齐，并有单测覆盖。
-- 有了 110 个单测锁住产物表、import-map、`main.ejs` 约定这几处易漂移的一致性关系，
+- 有了 134 个单测锁住产物表、import-map、`main.ejs` 约定这几处易漂移的一致性关系，
   `prepareResources` 也能借 `runtimeRoot` 入参端到端跑而不污染真实产物目录。
 - 剩下的主要缺口是 **runtime 目录默认多实例隔离** 和 **Windows 实机验证**，以及 Pink 侧集成。
 - 所以当前更适合定义为：**cocos-cli 侧已跑通、mac 上已回归的可用版本**，还不是最终稳定版。

@@ -101,11 +101,6 @@ export interface ISimulatorPreparedResources {
 
 export interface ISimulatorStartOptions {
     runtimeRoot?: string;
-    /**
-     * @deprecated Use runtimeRoot instead. Kept temporarily as an alias while Pink
-     * migrates to the runtime-root based launch flow.
-     */
-    projectDir?: string;
     enginePath?: string;
     entryFile?: string;
     writablePath?: string;
@@ -126,20 +121,55 @@ export interface ISimulatorSessionInfo {
     pid?: number;
     status: SimulatorStatus;
     startedAt?: string;
+    /**
+     * 进程产出第一行 stdout 的时刻。对齐 editor 的 `runSimulator(onCompleted)` —— 它也是在
+     * 首个 stdout 数据上判定「起来了」（`app/builtin/preview/source/browser/simulator.ts:296`）。
+     *
+     * `status` 仍然只有 running / stopped 两态：spawn 成功即 running，这里只是补一个
+     * 「已经开始出输出」的时间点，供 UI 收起 loading 态。
+     */
+    readyAt?: string;
     exitedAt?: string;
     exitCode?: number | null;
     signal?: NodeJS.Signals | string | null;
     runtimeRoot: string;
-    /**
-     * @deprecated Use runtimeRoot instead.
-     */
-    projectDir: string;
     enginePath: string;
     executablePath: string;
     args: string[];
 }
 
-export interface ISimulatorLaunchPreviewOptions extends ISimulatorPrepareOptions, Omit<ISimulatorStartOptions, 'runtimeRoot' | 'projectDir' | 'entryFile' | 'writablePath'> {
+/**
+ * 一行来自 simulator 进程或构建脚本的输出。
+ *
+ * 对齐 editor：它把 simulator 的 stdout/stderr 直接 `console.log` / `console.error`
+ * （`simulator.ts:295-304`）。cocos-cli 跑在 Pink 的 utility process 里，光靠 console
+ * 只能进 Pink 的宿主日志，所以额外用事件抛出来，让 IDE 能自己决定怎么展示。
+ */
+export interface ISimulatorLogEntry {
+    /** `simulator` 来自模拟器进程，`build` 来自 buildNative / buildRuntime 的子进程。 */
+    source: 'simulator' | 'build';
+    level: 'log' | 'error';
+    message: string;
+    /** `source === 'simulator'` 时带上会话 id，便于多会话下对应。 */
+    sessionId?: string;
+}
+
+/**
+ * 构建阶段状态。
+ *
+ * 只有 start / success / failed 三态，**不带百分比**：对齐 editor 的两点广播
+ * （`programming:compile-start` / `programming:compiled`，见
+ * `app/builtin/preview/source/browser/index.ts:36-48`）。两个构建脚本自身没有可靠的
+ * 总步数，逐行输出走 {@link ISimulatorLogEntry}。
+ */
+export interface ISimulatorBuildState {
+    step: 'native' | 'runtime';
+    state: 'start' | 'success' | 'failed';
+    /** `state === 'failed'` 时的错误信息。 */
+    error?: string;
+}
+
+export interface ISimulatorLaunchPreviewOptions extends ISimulatorPrepareOptions, Omit<ISimulatorStartOptions, 'runtimeRoot' | 'entryFile' | 'writablePath'> {
     port?: number;
     previewMode?: 'game' | 'scene-editor';
 }
@@ -285,9 +315,8 @@ export function resolveRuntimeRoot(
     options: ISimulatorStartOptions,
     host: ISimulatorHostEnv = currentHostEnv(),
 ): string {
-    const runtimeRoot = options.runtimeRoot ?? options.projectDir;
-    if (runtimeRoot) {
-        return resolve(runtimeRoot);
+    if (options.runtimeRoot) {
+        return resolve(options.runtimeRoot);
     }
     return getSimulatorResourcesPath(options.enginePath, host);
 }
