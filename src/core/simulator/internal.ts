@@ -171,7 +171,6 @@ export interface ISimulatorBuildState {
 
 export interface ISimulatorLaunchPreviewOptions extends ISimulatorPrepareOptions, Omit<ISimulatorStartOptions, 'runtimeRoot' | 'entryFile' | 'writablePath'> {
     port?: number;
-    previewMode?: 'game' | 'scene-editor';
 }
 
 export interface ISimulatorLaunchPreviewResult {

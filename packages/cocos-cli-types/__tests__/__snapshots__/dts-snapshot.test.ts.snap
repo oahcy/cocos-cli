@@ -8662,7 +8662,6 @@ export declare interface ISimulatorBuildState {
 }
 export declare interface ISimulatorLaunchPreviewOptions extends ISimulatorPrepareOptions, Omit<ISimulatorStartOptions, 'runtimeRoot' | 'entryFile' | 'writablePath'> {
     port?: number;
-    previewMode?: 'game' | 'scene-editor';
 }
 export declare interface ISimulatorLaunchPreviewResult {
     prepared: ISimulatorPreparedResources;
@@ -9610,7 +9609,6 @@ export declare interface ISimulatorBuildState {
 }
 export declare interface ISimulatorLaunchPreviewOptions extends ISimulatorPrepareOptions, Omit<ISimulatorStartOptions, 'runtimeRoot' | 'entryFile' | 'writablePath'> {
     port?: number;
-    previewMode?: 'game' | 'scene-editor';
 }
 export declare interface ISimulatorLaunchPreviewResult {
     prepared: ISimulatorPreparedResources;

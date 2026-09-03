@@ -132,7 +132,7 @@ async function resolveServerURL(serverURL?: string): Promise<string> {
 
 async function ensurePreviewServer(
     projectPath: string,
-    options: Pick<ISimulatorLaunchPreviewOptions, 'serverURL' | 'port' | 'previewMode' | 'startScene'>,
+    options: Pick<ISimulatorLaunchPreviewOptions, 'serverURL' | 'port' | 'startScene'>,
 ): Promise<string> {
     const { getServerUrl } = await import('../../server');
     if (isReadyServerURL(options.serverURL)) {
@@ -146,18 +146,11 @@ async function ensurePreviewServer(
 
     const { default: Launcher } = await import('../launcher');
     const launcher = new Launcher(projectPath);
-    if (options.previewMode === 'scene-editor') {
-        await launcher.startSceneEditorPreview({
-            port: options.port,
-            open: false,
-        });
-    } else {
-        await launcher.startGamePreview({
-            port: options.port,
-            scene: options.startScene && options.startScene !== 'current_scene' ? options.startScene : undefined,
-            open: false,
-        });
-    }
+    await launcher.startGamePreview({
+        port: options.port,
+        scene: options.startScene && options.startScene !== 'current_scene' ? options.startScene : undefined,
+        open: false,
+    });
 
     serverURL = getServerUrl();
     if (!isReadyServerURL(serverURL)) {
