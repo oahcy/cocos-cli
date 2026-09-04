@@ -29,7 +29,7 @@
 - `npm run build:simulator:native`
 - `npm run build:simulator:runtime`
 - `npm run build:simulator`
-- `npm run build` 已带上 simulator
+- `npm run build` 不再带 simulator（`npm run release` 会在打包前自动构建）
 - `workflow/release.js` 也接了 simulator build
 
 主要实现文件：
@@ -219,7 +219,7 @@ npx jest tests/simulator-
 不需要启动 simulator 窗口，也不会碰 app bundle 里的 runtime 目录
 （`prepareResources` 的端到端用例走 `runtimeRoot` 入参写临时目录）。
 
-**前置条件：先跑过一次 `npm run build:simulator`。** 四个 suite 里只有
+**前置条件：先跑过一次 `npm run build:simulator:runtime`。** 四个 suite 里只有
 `simulator-build-artifacts` 的一部分是纯静态断言，其余都依赖构建产物：
 
 | 依赖 | 谁生成 | 是否进版本库 |

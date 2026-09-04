@@ -81,7 +81,7 @@ For detailed command documentation, see [Commands Documentation](docs/en/command
 
 ## 🖥️ Simulator Preview
 
-The editor's simulator preview has been ported to `cocos-cli`. Building the simulator is part of `npm run build`, or you can build it directly:
+The editor's simulator preview has been ported to `cocos-cli`. The simulator is no longer part of `npm run build` — it's built automatically by `npm run release`, or you can build it directly:
 
 ```bash
 # Build the native simulator executable + runtime artifacts
