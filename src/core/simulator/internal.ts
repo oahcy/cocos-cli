@@ -3,7 +3,7 @@
  * 内置预加载资源裁剪。
  *
  * 这些函数被单独放在这里是为了能在任意宿主平台上做单元测试（尤其是 Windows 分支，
- * 见 `tests/simulator-internal.test.ts`）：凡是依赖 `process.platform` /
+ * 见 `tests/simulator-manager.test.ts`）：凡是依赖 `process.platform` /
  * `process.env.LOCALAPPDATA` 的地方都改成从 {@link ISimulatorHostEnv} 取，
  * 默认值仍然是当前进程的真实环境。
  */
@@ -203,7 +203,7 @@ export function currentHostEnv(): ISimulatorHostEnv {
 
 /**
  * 与 `workflow/build-simulator.js` 里的同名表必须保持一致（由
- * `tests/simulator-build-artifacts.test.ts` 断言），否则「构建出的可执行文件」和
+ * `tests/simulator-runtime.test.ts` 断言），否则「构建出的可执行文件」和
  * 「运行时查找的可执行文件」会脱钩。
  */
 export const platformArtifacts: Partial<Record<NodeJS.Platform, IHostArtifact>> = {

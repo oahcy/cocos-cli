@@ -4,7 +4,7 @@
  *
  * 和 `index.ts` 分开是因为这些函数只依赖 fs / ejs / 引擎自身，不碰 builder、asset-db、
  * preview server，所以可以在单元测试里直接对着临时目录跑（见
- * `tests/simulator-runtime-writer.test.ts`）。
+ * `tests/simulator-runtime.test.ts`）。
  */
 
 import ejs from 'ejs';

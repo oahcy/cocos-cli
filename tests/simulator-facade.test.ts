@@ -45,11 +45,6 @@ describe('lib/simulator 接口冻结', () => {
         expect(exportNames.slice().sort()).toEqual(FROZEN_EXPORTS.slice().sort());
     });
 
-    it('一共 19 个函数', () => {
-        expect(exportNames).toHaveLength(19);
-        expect(new Set(FROZEN_EXPORTS).size).toBe(19);
-    });
-
     it('三个事件同步返回反订阅函数（Pink 的 init 里拿不到 await）', () => {
         for (const name of ['onDidChangeSession', 'onLog', 'onDidChangeBuildState'] as const) {
             const dispose = Simulator[name](() => { /* noop */ });

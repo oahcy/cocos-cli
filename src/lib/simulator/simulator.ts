@@ -3,9 +3,7 @@
  *
  * 这份导出列表**就是**协议：Pink 侧的 `handle` 是无白名单的通用转发，每一个导出函数都自动
  * 成为公开 API，接入之后再删就是跨仓库 break。改动前请先看
- * `docs/simulator-pink-interface.md`（含与 editor `app/builtin/preview` 的逐项对照）。
  *
- * 三个约束（实测自装机版 PinK 1.127.0）：
  * - 入参 / 返回值只能是 JSON 值 —— 不能出现函数、class 实例、`Map` / `Set` / `Date`；
  * - 事件只能写成 `onXxx(listener): () => void`，Pink 在 init 里订阅并转发；
  * - 导出的 `init` 会被基类自动调用。
